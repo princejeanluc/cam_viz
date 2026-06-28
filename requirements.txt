@@ -1,0 +1,15 @@
+geopandas>=0.14.0
+pandas>=2.0.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+folium>=0.14.0
+plotly>=5.15.0
+requests>=2.31.0
+thefuzz>=0.20.0
+python-Levenshtein>=0.21.0
+shapely>=2.0.0
+mapclassify>=2.5.0
+# Pour l'export Power BI (export_powerbi.py)
+topojson>=1.7
+# Optionnel : osmnx pour les données urbaines fines
+# osmnx>=1.6.0
