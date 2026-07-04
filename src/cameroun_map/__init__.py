@@ -11,6 +11,7 @@ Usage minimal :
 
 from .cameroun_viz import (
     CarteCameroun,
+    Style,
     charger_gadm,
     charger_osm_quartiers,
     joindre_metrique,
@@ -20,6 +21,7 @@ from .cameroun_viz import (
     CRS_GLOBAL,
     REGIONS_OFFICIELLES,
     SCHEMAS_COULEUR,
+    SYMBOLES_PREDEFINIS,
 )
 from .adapter_dataset import (
     diagnostiquer_dataset,
@@ -34,6 +36,8 @@ from .export_powerbi import exporter_pour_powerbi
 
 __all__ = [
     "CarteCameroun",
+    "Style",
+    "SYMBOLES_PREDEFINIS",
     "charger_gadm",
     "charger_osm_quartiers",
     "joindre_metrique",

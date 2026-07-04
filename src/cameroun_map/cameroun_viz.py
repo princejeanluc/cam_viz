@@ -8,15 +8,59 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.colors import BoundaryNorm, ListedColormap, LinearSegmentedColormap
 from matplotlib import cm
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
 import folium
 from folium.plugins import FloatImage
 import plotly.express as px
 import requests, zipfile, io, os, re
 from pathlib import Path
+from dataclasses import dataclass, field
 import warnings
 warnings.filterwarnings("ignore")
+
+
+@dataclass
+class Style:
+    """
+    Contrôle l'apparence visuelle d'une carte.
+    Passez un objet Style à CarteCameroun(style=...) pour personnaliser le rendu.
+
+    Exemple publication (fond blanc, palette sobre) :
+        Style(fond_blanc=True, palette=["#EDF5FF","#9EC8F0","#2E86AB","#1A5276"])
+    """
+    # Palette choroplèthe — liste de couleurs hex, ou None pour garder schema_couleur
+    palette: list = None
+
+    # Fonds
+    fond_figure: str = "#F8F8F0"   # marge autour de la carte
+    fond_carte:  str = "#D4E8F4"   # zone eau/fond
+    fond_blanc:  bool = False      # raccourci mode publication
+
+    # Contours
+    contours_zones_couleur:    str   = "white"
+    contours_zones_epaisseur:  float = 0.6
+    contours_pays_couleur:     str   = "#333333"
+    contours_pays_epaisseur:   float = 0.3
+
+    # Typographie
+    police:       str   = None     # nom de famille ("Arial") ou chemin vers .ttf
+    taille_titre: int   = 16
+    taille_labels: float = 6.5
+    couleur_titre: str  = "#1A1A1A"
+
+    # Zones sans données
+    manquant_couleur: str = "#D0D0D0"
+    manquant_hatch:   str = "///"
+
+    # Résolution export
+    dpi: int = 180
+
+    def __post_init__(self):
+        if self.fond_blanc:
+            self.fond_figure = "white"
+            self.fond_carte  = "#F0F0F5"
 
 try:
     from thefuzz import process as fuzzy_process   # pip install thefuzz
@@ -374,7 +418,12 @@ def carte_statique(
     afficher_labels: bool = False,
     afficher_contour_pays: bool = True,
     sortie: str = None,
-    figsize: tuple = (12, 14)
+    figsize: tuple = (12, 14),
+    # ── Personnalisation ─────────────────────────────────────────────────────
+    style: "Style" = None,
+    sous_titre: str = None,
+    source: str = None,
+    couches: list = None,
 ) -> plt.Figure:
     """
     Génère une carte choroplèthe statique de haute qualité.
@@ -393,69 +442,78 @@ def carte_statique(
         sortie                 : chemin de sauvegarde (PNG/SVG)
         figsize                : taille de la figure
     """
-    # Reprojection en UTM pour une meilleure représentation locale
+    s = style or Style()  # Style par défaut si rien n'est fourni
+
+    # ── Reprojection ─────────────────────────────────────────────────────────
     gdf_proj = gdf.to_crs(CRS_LOCAL)
-    
+
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    fig.patch.set_facecolor("#F8F8F0")
-    ax.set_facecolor("#D4E8F4")  # fond mer/eau
-    
-    # ── Zones sans données : hachurage gris ──────────────────────────────────
+    fig.patch.set_facecolor(s.fond_figure)
+    ax.set_facecolor(s.fond_carte)
+
+    # ── Zones sans données : hachurage ───────────────────────────────────────
     gdf_manquant = gdf_proj[gdf_proj["manquant"]]
     if not gdf_manquant.empty:
         gdf_manquant.plot(
-            ax=ax, color="#D0D0D0", edgecolor="white",
-            linewidth=0.6, hatch="///", label="Données manquantes"
+            ax=ax, color=s.manquant_couleur,
+            edgecolor=s.contours_zones_couleur,
+            linewidth=s.contours_zones_epaisseur,
+            hatch=s.manquant_hatch, label="Données manquantes",
         )
-    
+
     # ── Classification & palette ─────────────────────────────────────────────
     gdf_data = gdf_proj[~gdf_proj["manquant"]].copy()
-    
+
     if not gdf_data.empty:
         valeurs = gdf_data[col_valeur]
         bornes, etiquettes = classifier_valeurs(valeurs, methode_classification, n_classes)
-        
-        cmap     = plt.get_cmap(schema_couleur, len(bornes) - 1)
-        norm     = BoundaryNorm(bornes, cmap.N)
-        
+
+        if s.palette:
+            cmap = LinearSegmentedColormap.from_list(
+                "custom", s.palette, N=len(bornes) - 1
+            )
+        else:
+            cmap = plt.get_cmap(schema_couleur, len(bornes) - 1)
+        norm = BoundaryNorm(bornes, cmap.N)
+
         gdf_data.plot(
-            ax=ax,
-            column=col_valeur,
-            cmap=cmap,
-            norm=norm,
-            edgecolor="white",
-            linewidth=0.6,
+            ax=ax, column=col_valeur, cmap=cmap, norm=norm,
+            edgecolor=s.contours_zones_couleur,
+            linewidth=s.contours_zones_epaisseur,
             legend=False,
-            missing_kwds={"color": "#D0D0D0", "hatch": "///"}
         )
-        
+
         # ── Légende manuelle ─────────────────────────────────────────────────
         patches = []
         for i, etiq in enumerate(etiquettes):
             couleur = cmap(i / max(len(etiquettes) - 1, 1))
-            label   = f"{etiq} {unite}".strip()
-            patches.append(mpatches.Patch(facecolor=couleur, edgecolor="grey",
-                                          linewidth=0.4, label=label))
+            patches.append(mpatches.Patch(
+                facecolor=couleur, edgecolor="grey", linewidth=0.4,
+                label=f"{etiq} {unite}".strip(),
+            ))
         if not gdf_manquant.empty:
             patches.append(mpatches.Patch(
-                facecolor="#D0D0D0", hatch="///", edgecolor="grey",
-                linewidth=0.4, label="Données manquantes"
+                facecolor=s.manquant_couleur, hatch=s.manquant_hatch,
+                edgecolor="grey", linewidth=0.4, label="Données manquantes",
             ))
-        
         leg = ax.legend(
             handles=patches, loc="lower left",
             title=f"Légende ({methode_classification})",
             title_fontsize=9, fontsize=8,
-            framealpha=0.95, edgecolor="#CCCCCC",
-            fancybox=False
+            framealpha=0.95, edgecolor="#CCCCCC", fancybox=False,
         )
         leg.get_frame().set_linewidth(0.5)
-    
+
     # ── Contour pays ─────────────────────────────────────────────────────────
     if afficher_contour_pays:
-        gdf_proj.boundary.plot(ax=ax, color="#333333", linewidth=0.3, alpha=0.5)
-    
-    # ── Labels des zones ──────────────────────────────────────────────────────
+        gdf_proj.boundary.plot(
+            ax=ax,
+            color=s.contours_pays_couleur,
+            linewidth=s.contours_pays_epaisseur,
+            alpha=0.5,
+        )
+
+    # ── Labels des zones ─────────────────────────────────────────────────────
     if afficher_labels and col_nom:
         for _, row in gdf_proj.iterrows():
             if row.geometry is None:
@@ -466,35 +524,57 @@ def carte_statique(
                 ax.annotate(
                     nom, xy=(centroid.x, centroid.y),
                     ha="center", va="center",
-                    fontsize=6.5, color="#222222",
+                    fontsize=s.taille_labels, color="#222222",
                     fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.6, ec="none")
+                    fontfamily=s.police or "sans-serif",
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white",
+                              alpha=0.6, ec="none"),
                 )
-    
-    # ── Esthétique ────────────────────────────────────────────────────────────
-    ax.set_title(titre, fontsize=16, fontweight="bold", pad=18, color="#1A1A1A")
+
+    # ── Couches superposées (symboles + annotations) ──────────────────────────
+    if couches:
+        _rendre_couches(ax, couches, gdf_proj, col_nom, CRS_LOCAL)
+
+    # ── Titre + sous-titre ───────────────────────────────────────────────────
+    ax.set_title(
+        titre,
+        fontsize=s.taille_titre, fontweight="bold", pad=18,
+        color=s.couleur_titre,
+        fontfamily=s.police or "sans-serif",
+    )
+    if sous_titre:
+        ax.text(
+            0.5, 1.01, sous_titre,
+            transform=ax.transAxes,
+            fontsize=s.taille_titre - 4, color="#555555",
+            ha="center", va="bottom",
+            fontfamily=s.police or "sans-serif",
+        )
+
     ax.axis("off")
-    
-    # Rose des vents
+
+    # ── Rose des vents ────────────────────────────────────────────────────────
     ax.annotate("N", xy=(0.97, 0.97), xycoords="axes fraction",
                 fontsize=14, ha="center", va="center", fontweight="bold")
     ax.annotate("↑", xy=(0.97, 0.94), xycoords="axes fraction",
                 fontsize=20, ha="center", va="center")
-    
-    # Échelle (approximative)
+
+    # ── Barre d'échelle ───────────────────────────────────────────────────────
     _ajouter_echelle(ax, gdf_proj)
-    
-    # Source
-    ax.text(0.01, 0.01, "Source : GADM v4.1 | Visualisation Python",
+
+    # ── Source ────────────────────────────────────────────────────────────────
+    texte_source = source if source is not None else "Source : GADM v4.1"
+    ax.text(0.01, 0.01, texte_source,
             transform=ax.transAxes, fontsize=7, color="#888888")
-    
+
     plt.tight_layout()
-    
+
     if sortie:
-        fig.savefig(sortie, dpi=180, bbox_inches="tight",
+        dpi = s.dpi if style else 180
+        fig.savefig(sortie, dpi=dpi, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
         print(f"[ok] Carte sauvegardée : {sortie}")
-    
+
     return fig
 
 
@@ -514,6 +594,174 @@ def _ajouter_echelle(ax, gdf_proj):
                 f"{cible_km} km", ha="center", va="bottom", fontsize=7)
     except Exception:
         pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6b. RENDU DES COUCHES SUPERPOSÉES (symboles + annotations)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Catalogue des symboles prédéfinis disponibles
+SYMBOLES_PREDEFINIS = {
+    "cercle":    "o",  "carre":    "s",  "triangle": "^",
+    "losange":   "D",  "etoile":   "*",  "croix":    "P",
+    "x":         "X",  "fleche":   ">",  "plus":     "+",
+    "★": "★", "▲": "▲", "●": "●", "■": "■", "✚": "✚", "⚠": "⚠",
+}
+
+
+def _coords_zone(nom_zone: str, gdf_proj: gpd.GeoDataFrame, col_nom: str):
+    """Retourne (x, y) projeté du centroïde d'une zone par son nom."""
+    masque = gdf_proj[col_nom].str.lower() == nom_zone.lower()
+    if not masque.any():
+        # Tentative de matching souple
+        candidats = gdf_proj[col_nom].dropna().tolist()
+        nom_corr = normaliser_nom(nom_zone, candidats)
+        masque = gdf_proj[col_nom].str.lower() == nom_corr.lower()
+    if not masque.any():
+        raise ValueError(f"Zone '{nom_zone}' introuvable dans la géométrie.")
+    centroid = gdf_proj[masque].geometry.centroid.iloc[0]
+    return centroid.x, centroid.y
+
+
+def _coords_latlon(lat: float, lon: float, crs_proj: str):
+    """Convertit lat/lon WGS84 en coordonnées projetées."""
+    pt = gpd.GeoDataFrame(
+        geometry=gpd.points_from_xy([lon], [lat]), crs="EPSG:4326"
+    ).to_crs(crs_proj)
+    return pt.geometry.iloc[0].x, pt.geometry.iloc[0].y
+
+
+def _rendre_couches(
+    ax,
+    couches: list,
+    gdf_proj: gpd.GeoDataFrame,
+    col_nom: str,
+    crs_proj: str,
+):
+    """Dessine toutes les couches (symboles + annotations) sur l'axe matplotlib."""
+    for couche in couches:
+        if couche["type"] == "symboles":
+            _rendre_couche_symboles(ax, couche, gdf_proj, col_nom, crs_proj)
+        elif couche["type"] == "annotation":
+            _rendre_couche_annotation(ax, couche, gdf_proj, col_nom, crs_proj)
+
+
+def _rendre_couche_symboles(ax, couche, gdf_proj, col_nom, crs_proj):
+    df        = couche["df"]
+    mode      = couche["mode"]         # "zone" | "coordonnees"
+    sym_type  = couche["sym_type"]     # "predefined" | "image"
+    col_cat   = couche.get("col_categorie")
+    symboles  = couche.get("symboles", {})
+    couleurs  = couche.get("couleurs", {})
+    couleur_d = couche.get("couleur", "#333333")
+    symbole_d = couche.get("symbole", "o")
+    taille    = couche.get("taille", 12)
+    alpha     = couche.get("alpha", 0.9)
+    zorder    = couche.get("zorder", 5)
+    offset    = couche.get("offset", (0, 0))
+
+    for _, row in df.iterrows():
+        # ── Coordonnées du point ─────────────────────────────────────────────
+        if mode == "zone":
+            try:
+                x, y = _coords_zone(str(row[couche["col_zone"]]), gdf_proj, col_nom)
+            except ValueError:
+                continue
+        else:
+            x, y = _coords_latlon(float(row[couche["col_lat"]]),
+                                   float(row[couche["col_lon"]]), crs_proj)
+
+        # ── Catégorie ────────────────────────────────────────────────────────
+        cat = str(row[col_cat]) if col_cat and col_cat in row.index else None
+        couleur = couleurs.get(cat, couleur_d) if cat else couleur_d
+        sym     = symboles.get(cat, symbole_d) if cat else symbole_d
+
+        # ── Rendu ────────────────────────────────────────────────────────────
+        if sym_type == "image":
+            chemin = symboles.get(cat) if cat else sym
+            try:
+                import PIL.Image as PILImage
+                img = PILImage.open(chemin).convert("RGBA")
+                img = img.resize((taille * 3, taille * 3), PILImage.LANCZOS)
+                oi  = OffsetImage(np.array(img), zoom=1.0, alpha=alpha)
+                ab  = AnnotationBbox(
+                    oi, (x, y), xybox=(x + offset[0], y + offset[1]),
+                    frameon=False, zorder=zorder,
+                )
+                ax.add_artist(ab)
+            except Exception as e:
+                print(f"[symboles] Impossible de charger l'image '{chemin}' : {e}")
+        else:
+            # Symbole unicode → ax.text ; marqueur matplotlib → ax.plot
+            if sym in SYMBOLES_PREDEFINIS and SYMBOLES_PREDEFINIS[sym] == sym:
+                # C'est un caractère unicode direct (★, ▲, ●…)
+                ax.text(x + offset[0], y + offset[1], sym,
+                        fontsize=taille, color=couleur, ha="center", va="center",
+                        alpha=alpha, zorder=zorder,
+                        fontfamily="DejaVu Sans")
+            else:
+                marker = SYMBOLES_PREDEFINIS.get(sym, sym)
+                ax.plot(x + offset[0], y + offset[1], marker=marker,
+                        color=couleur, markersize=taille / 1.5, alpha=alpha,
+                        zorder=zorder, linestyle="None",
+                        markeredgecolor="white", markeredgewidth=0.4)
+
+
+def _rendre_couche_annotation(ax, couche, gdf_proj, col_nom, crs_proj):
+    cible       = couche["cible"]
+    texte       = couche["texte"]
+    style_ann   = couche.get("style_ann", "callout")
+    fond        = couche.get("couleur_fond", "#FFFDE7")
+    coul_texte  = couche.get("couleur_texte", "#1A1A1A")
+    coul_fleche = couche.get("couleur_fleche", "#333333")
+    taille      = couche.get("taille_texte", 8)
+    offset      = couche.get("offset", (30, 30))
+    zorder      = couche.get("zorder", 6)
+
+    # ── Coordonnées cible ────────────────────────────────────────────────────
+    if isinstance(cible, str):
+        try:
+            x, y = _coords_zone(cible, gdf_proj, col_nom)
+        except ValueError:
+            print(f"[annotation] Zone '{cible}' introuvable — ignorée.")
+            return
+    else:
+        # (lon, lat) tuple
+        x, y = _coords_latlon(float(cible[1]), float(cible[0]), crs_proj)
+
+    bbox_props = dict(
+        boxstyle="round,pad=0.4",
+        facecolor=fond,
+        edgecolor="#AAAAAA",
+        linewidth=0.6,
+        alpha=0.93,
+    )
+
+    if style_ann == "callout":
+        ax.annotate(
+            texte,
+            xy=(x, y),
+            xytext=(x + offset[0] * 1000, y + offset[1] * 1000),
+            fontsize=taille, color=coul_texte, zorder=zorder,
+            bbox=bbox_props,
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color=coul_fleche,
+                lw=0.8,
+                connectionstyle="arc3,rad=0.15",
+            ),
+        )
+    elif style_ann == "highlight":
+        ax.annotate(
+            texte,
+            xy=(x, y),
+            fontsize=taille, color=coul_texte, zorder=zorder,
+            ha="center", va="center",
+            bbox=bbox_props,
+        )
+    else:  # "valeur" — texte simple sans boîte
+        ax.text(x, y, texte, fontsize=taille, color=coul_texte,
+                ha="center", va="center", zorder=zorder, fontweight="bold")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -763,17 +1011,20 @@ class CarteCameroun:
         )
     """
     
-    def __init__(self, niveau: str = "regions"):
+    def __init__(self, niveau: str = "regions", style: Style = None):
         """
         niveau : 'pays', 'regions', 'departements', 'arrondissements', 'osm_quartiers'
+        style  : objet Style pour personnaliser couleurs, police, fonds, DPI
         """
         if niveau not in list(GADM_LEVELS.keys()) + ["osm_quartiers"]:
             raise ValueError(f"Niveau inconnu : {niveau}. Choisir parmi {list(GADM_LEVELS)}")
-        
+
         self.niveau    = niveau
-        self.gdf       = None    # GeoDataFrame géographique
-        self.gdf_joint = None    # GeoDataFrame après jointure métrique
-        self._col_nom  = None    # colonne de nom identifiée
+        self.style     = style or Style()
+        self.gdf       = None
+        self.gdf_joint = None
+        self._col_nom  = None
+        self._couches: list = []   # couches superposées accumulées
     
     def charger_geo(self, ville_osm: str = "Douala", forcer: bool = False):
         """Charge les limites géographiques selon le niveau choisi."""
@@ -1045,6 +1296,120 @@ class CarteCameroun:
 
         return clone
 
+    # ── COUCHES SUPERPOSÉES ───────────────────────────────────────────────────
+
+    def ajouter_symboles(
+        self,
+        df: pd.DataFrame,
+        *,
+        type: str = "predefined",
+        col_zone: str = None,
+        col_lat: str = None,
+        col_lon: str = None,
+        col_categorie: str = None,
+        symboles: dict = None,
+        couleurs: dict = None,
+        couleur: str = "#333333",
+        symbole: str = "o",
+        taille: int = 12,
+        alpha: float = 0.9,
+        offset: tuple = (0, 0),
+        zorder: int = 5,
+    ) -> "CarteCameroun":
+        """
+        Ajoute une couche de symboles sur la carte.
+
+        Deux modes de placement (au moins un requis) :
+          col_zone  : nom de zone dans df → centroïde automatique
+          col_lat + col_lon : coordonnées explicites (WGS84)
+
+        Deux types de symbole :
+          "predefined" : marqueur matplotlib (o, s, ^, D, *, P, X)
+                         ou unicode (★ ▲ ● ■ ✚ ⚠)
+          "image"      : fichier PNG/SVG — dict symboles = {"cat": "chemin.png"}
+
+        Paramètre optionnel col_categorie : colonne du df qui sélectionne
+        le symbole/couleur dans les dicts symboles/couleurs.
+        Sans col_categorie : tous les points reçoivent symbole/couleur par défaut.
+
+        Retourne self pour permettre le chaînage.
+        """
+        if col_zone is None and (col_lat is None or col_lon is None):
+            raise ValueError(
+                "Précisez col_zone OU (col_lat + col_lon) pour placer les symboles."
+            )
+        mode = "zone" if col_zone else "coordonnees"
+        self._couches.append({
+            "type":          "symboles",
+            "df":            df.copy(),
+            "mode":          mode,
+            "sym_type":      type,
+            "col_zone":      col_zone,
+            "col_lat":       col_lat,
+            "col_lon":       col_lon,
+            "col_categorie": col_categorie,
+            "symboles":      symboles or {},
+            "couleurs":      couleurs or {},
+            "couleur":       couleur,
+            "symbole":       symbole,
+            "taille":        taille,
+            "alpha":         alpha,
+            "offset":        offset,
+            "zorder":        zorder,
+        })
+        return self
+
+    def ajouter_annotation(
+        self,
+        cible,
+        texte: str,
+        *,
+        style: str = "callout",
+        couleur_fond: str = "#FFFDE7",
+        couleur_texte: str = "#1A1A1A",
+        couleur_fleche: str = "#333333",
+        taille_texte: float = 8,
+        offset: tuple = (30, 30),
+        zorder: int = 6,
+    ) -> "CarteCameroun":
+        """
+        Ajoute une annotation textuelle sur la carte.
+
+        cible  : nom de zone (str) → centroïde automatique
+                 OU (lat, lon) tuple → coordonnées explicites
+
+        style  :
+          "callout"   — boîte de texte avec flèche pointant vers la cible
+          "highlight" — boîte de texte directement sur la cible, sans flèche
+          "valeur"    — texte simple en gras, sans boîte
+
+        offset : décalage du label par rapport à la cible, en kilomètres
+                 (ex: (30, 30) = 30 km à droite et 30 km au-dessus).
+                 Ignoré pour le style "highlight".
+
+        Retourne self pour permettre le chaînage.
+        """
+        self._couches.append({
+            "type":          "annotation",
+            "cible":         cible,
+            "texte":         texte,
+            "style_ann":     style,
+            "couleur_fond":  couleur_fond,
+            "couleur_texte": couleur_texte,
+            "couleur_fleche":couleur_fleche,
+            "taille_texte":  taille_texte,
+            "offset":        offset,
+            "zorder":        zorder,
+        })
+        return self
+
+    def reinitialiser_couches(self) -> "CarteCameroun":
+        """Efface toutes les couches superposées accumulées."""
+        self._couches = []
+        return self
+
+    # ── RENDU ─────────────────────────────────────────────────────────────────
+
     def visualiser(
         self,
         titre: str = "Carte du Cameroun",
@@ -1054,6 +1419,8 @@ class CarteCameroun:
         schema_couleur: str = "YlOrRd",
         afficher_labels: bool = True,
         afficher_contexte: bool = True,
+        sous_titre: str = None,
+        source: str = None,
         sortie: str = None,
         **kwargs
     ) -> plt.Figure:
@@ -1082,6 +1449,10 @@ class CarteCameroun:
                 afficher_labels=afficher_labels,
                 zone_focus=zone_focus,
                 sortie=sortie,
+                style=self.style,
+                sous_titre=sous_titre,
+                source=source,
+                couches=self._couches or None,
             )
 
         return carte_statique(
@@ -1094,6 +1465,10 @@ class CarteCameroun:
             unite=unite,
             afficher_labels=afficher_labels,
             sortie=sortie,
+            style=self.style,
+            sous_titre=sous_titre,
+            source=source,
+            couches=self._couches or None,
             **kwargs
         )
 
@@ -1154,6 +1529,10 @@ def _carte_avec_contexte(
     zone_focus: str,
     sortie: str = None,
     figsize: tuple = (12, 14),
+    style: "Style" = None,
+    sous_titre: str = None,
+    source: str = None,
+    couches: list = None,
 ) -> plt.Figure:
     """
     Dessine une carte en deux couches :
@@ -1162,58 +1541,62 @@ def _carte_avec_contexte(
 
     Le fond donne le contexte géographique, la zone d'intérêt ressort clairement.
     """
+    s = style or Style()
+
     gdf_contexte_proj = gdf_contexte.to_crs(CRS_LOCAL)
     gdf_focus_proj    = gdf_focus.to_crs(CRS_LOCAL)
 
     fig, ax = plt.subplots(1, 1, figsize=figsize)
-    fig.patch.set_facecolor("#F8F8F0")
-    ax.set_facecolor("#D4E8F4")
+    fig.patch.set_facecolor(s.fond_figure)
+    ax.set_facecolor(s.fond_carte)
 
-    # ── Couche fond : tout le Cameroun, gris pâle ─────────────────────────────
+    # ── Fond : tout le Cameroun en gris pâle ─────────────────────────────────
     gdf_contexte_proj.plot(
-        ax=ax,
-        color="#E8E8E4",
-        edgecolor="#BBBBBB",
-        linewidth=0.4,
-        zorder=1,
+        ax=ax, color="#E8E8E4", edgecolor="#BBBBBB", linewidth=0.4, zorder=1,
     )
 
-    # ── Couche focus : zones colorées par métrique ───────────────────────────
+    # ── Focus : zones colorées par métrique ──────────────────────────────────
     gdf_data = gdf_focus_proj[~gdf_focus_proj["manquant"]]
     gdf_manq = gdf_focus_proj[gdf_focus_proj["manquant"]]
 
     if not gdf_manq.empty:
         gdf_manq.plot(
-            ax=ax, color="#D0D0D0", edgecolor="white",
-            linewidth=0.6, hatch="///", zorder=2
+            ax=ax, color=s.manquant_couleur,
+            edgecolor=s.contours_zones_couleur,
+            linewidth=s.contours_zones_epaisseur,
+            hatch=s.manquant_hatch, zorder=2,
         )
 
     if not gdf_data.empty:
         valeurs = gdf_data["valeur"]
         bornes, etiquettes = classifier_valeurs(valeurs, methode_classification, n_classes)
-        cmap = plt.get_cmap(schema_couleur, len(bornes) - 1)
+        if s.palette:
+            cmap = LinearSegmentedColormap.from_list(
+                "custom", s.palette, N=len(bornes) - 1
+            )
+        else:
+            cmap = plt.get_cmap(schema_couleur, len(bornes) - 1)
         norm = BoundaryNorm(bornes, cmap.N)
 
         gdf_data.plot(
-            ax=ax, column="valeur",
-            cmap=cmap, norm=norm,
-            edgecolor="white", linewidth=0.8,
+            ax=ax, column="valeur", cmap=cmap, norm=norm,
+            edgecolor=s.contours_zones_couleur,
+            linewidth=s.contours_zones_epaisseur,
             zorder=3, legend=False,
         )
 
-        # Légende
         patches = [
             mpatches.Patch(
                 facecolor=cmap(i / max(len(etiquettes) - 1, 1)),
                 edgecolor="grey", linewidth=0.4,
-                label=f"{e} {unite}".strip()
+                label=f"{e} {unite}".strip(),
             )
             for i, e in enumerate(etiquettes)
         ]
         if not gdf_manq.empty:
             patches.append(mpatches.Patch(
-                facecolor="#D0D0D0", hatch="///", edgecolor="grey",
-                linewidth=0.4, label="Données manquantes"
+                facecolor=s.manquant_couleur, hatch=s.manquant_hatch,
+                edgecolor="grey", linewidth=0.4, label="Données manquantes",
             ))
         leg = ax.legend(handles=patches, loc="lower left",
                         title=f"Légende ({methode_classification})",
@@ -1221,10 +1604,12 @@ def _carte_avec_contexte(
                         framealpha=0.95, edgecolor="#CCCCCC", fancybox=False)
         leg.get_frame().set_linewidth(0.5)
 
-    # ── Contour de surbrillance autour de la zone focalisée ──────────────────
-    gdf_focus_proj.boundary.plot(ax=ax, color="#222222", linewidth=1.2, zorder=4)
+    # ── Contour de surbrillance ───────────────────────────────────────────────
+    gdf_focus_proj.boundary.plot(
+        ax=ax, color=s.contours_pays_couleur, linewidth=1.2, zorder=4,
+    )
 
-    # ── Labels ────────────────────────────────────────────────────────────────
+    # ── Labels ───────────────────────────────────────────────────────────────
     if afficher_labels and col_nom:
         for _, row in gdf_focus_proj.iterrows():
             if row.geometry is None:
@@ -1234,34 +1619,50 @@ def _carte_avec_contexte(
             if nom and nom != "nan":
                 ax.annotate(
                     nom, xy=(centroid.x, centroid.y),
-                    ha="center", va="center", fontsize=7,
+                    ha="center", va="center",
+                    fontsize=s.taille_labels + 0.5,
                     color="#111111", fontweight="bold",
-                    bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.7, ec="none"),
+                    fontfamily=s.police or "sans-serif",
+                    bbox=dict(boxstyle="round,pad=0.15", fc="white",
+                              alpha=0.7, ec="none"),
                     zorder=5,
                 )
 
-    # ── Esthétique ────────────────────────────────────────────────────────────
-    ax.set_title(titre, fontsize=16, fontweight="bold", pad=18, color="#1A1A1A")
+    # ── Couches superposées ───────────────────────────────────────────────────
+    if couches:
+        _rendre_couches(ax, couches, gdf_focus_proj, col_nom, CRS_LOCAL)
 
-    # Zoom automatique sur la zone focalisée + marge de 10 %
+    # ── Titre + sous-titre ────────────────────────────────────────────────────
+    ax.set_title(
+        titre, fontsize=s.taille_titre, fontweight="bold", pad=18,
+        color=s.couleur_titre, fontfamily=s.police or "sans-serif",
+    )
+    if sous_titre:
+        ax.text(
+            0.5, 1.01, sous_titre,
+            transform=ax.transAxes,
+            fontsize=s.taille_titre - 4, color="#555555",
+            ha="center", va="bottom",
+            fontfamily=s.police or "sans-serif",
+        )
+
+    # ── Zoom + cadrage sur la zone focalisée ─────────────────────────────────
     xmin, ymin, xmax, ymax = gdf_focus_proj.total_bounds
-    marge_x = (xmax - xmin) * 0.10
-    marge_y = (ymax - ymin) * 0.10
-    ax.set_xlim(xmin - marge_x, xmax + marge_x)
-    ax.set_ylim(ymin - marge_y, ymax + marge_y)
+    mx, my = (xmax - xmin) * 0.10, (ymax - ymin) * 0.10
+    ax.set_xlim(xmin - mx, xmax + mx)
+    ax.set_ylim(ymin - my, ymax + my)
 
     ax.axis("off")
     _ajouter_echelle(ax, gdf_focus_proj)
 
-    # Annotation de localisation
-    ax.text(0.99, 0.01, f"Focus : {zone_focus} | Source : GADM v4.1",
-            transform=ax.transAxes, fontsize=7,
-            color="#888888", ha="right")
+    texte_source = source if source is not None else f"Focus : {zone_focus} | Source : GADM v4.1"
+    ax.text(0.99, 0.01, texte_source,
+            transform=ax.transAxes, fontsize=7, color="#888888", ha="right")
 
     plt.tight_layout()
 
     if sortie:
-        fig.savefig(sortie, dpi=180, bbox_inches="tight",
+        fig.savefig(sortie, dpi=s.dpi, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
         print(f"[ok] Carte sauvegardée : {sortie}")
 
