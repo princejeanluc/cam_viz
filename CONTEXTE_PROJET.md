@@ -244,6 +244,16 @@ l'utilisateur n'a jamais à s'en préoccuper.
 
 ## 10. Bugs connus et dette technique
 
+### Bug réseau corrigé (session 2026-06-28)
+`charger_gadm()` levait un `ConnectionError` non récupérable au moindre
+`ConnectionResetError` pendant le handshake TLS avec geodata.ucdavis.edu —
+observé dans `examples/galerie.ipynb` en environnement Windows réel (pare-feu
+ou antivirus qui inspecte le HTTPS, ou instabilité côté serveur GADM).
+Corrigé en routant la requête via une `requests.Session` avec
+`urllib3.Retry(total=4, backoff_factor=1.5)` (fonction `_session_avec_retries`
+dans `cameroun_viz.py`). Le message d'erreur final (si les 4 tentatives
+échouent) reste explicite et pointe vers le téléchargement manuel.
+
 ### Bug critique corrigé dans cette session
 `visualiser()` et `visualiser_interactif()` étaient définies deux fois dans
 la classe `CarteCameroun`. Python garde silencieusement la dernière définition.

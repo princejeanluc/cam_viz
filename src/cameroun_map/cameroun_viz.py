@@ -66,11 +66,31 @@ REGIONS_OFFICIELLES = [
 # 2. CHARGEMENT DES DONNÉES GÉOGRAPHIQUES
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _session_avec_retries(total: int = 4, backoff_factor: float = 1.5) -> requests.Session:
+    """
+    Session requests qui retente les erreurs de connexion/SSL transitoires
+    (ex: ConnectionResetError pendant le handshake TLS, fréquent sur les
+    réseaux d'entreprise ou avec certains antivirus qui inspectent le HTTPS).
+    """
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    retry = Retry(
+        total=total,
+        backoff_factor=backoff_factor,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
+
+
 def charger_gadm(niveau: int = 1, forcer_telechargement: bool = False) -> gpd.GeoDataFrame:
     """
     Charge les limites administratives depuis GADM (gadm.org).
     niveau : 0=pays, 1=régions, 2=départements, 3=arrondissements
-    
+
     Stratégie de cache : le GeoJSON est sauvegardé localement.
     """
     cache_path = DATA_DIR / f"cameroun_gadm_niveau{niveau}.geojson"
@@ -82,18 +102,22 @@ def charger_gadm(niveau: int = 1, forcer_telechargement: bool = False) -> gpd.Ge
     # URL officielle GADM v4.1
     url = f"https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_CMR_{niveau}.json"
     print(f"[download] Téléchargement GADM niveau {niveau} : {url}")
-    
+
     try:
-        resp = requests.get(url, timeout=60)
+        session = _session_avec_retries()
+        resp = session.get(url, timeout=60)
         resp.raise_for_status()
         gdf = gpd.read_file(io.BytesIO(resp.content))
         gdf.to_file(cache_path, driver="GeoJSON")
         print(f"[ok] {len(gdf)} entités chargées, sauvegardées dans {cache_path}")
         return gdf
     except Exception as e:
-        print(f"[erreur] Téléchargement échoué : {e}")
-        print("  → Téléchargez manuellement sur https://gadm.org/download_country.html (Cameroon)")
-        print(f"  → Placez le fichier GeoJSON dans {cache_path}")
+        print(f"[erreur] Téléchargement échoué après plusieurs tentatives : {e}")
+        print("  Causes fréquentes : pare-feu d'entreprise, antivirus qui inspecte le HTTPS,")
+        print("  ou serveur GADM temporairement instable.")
+        print("  → Solution de contournement : téléchargez le GeoJSON manuellement sur")
+        print("    https://gadm.org/download_country.html (choisir Cameroon, format GeoJSON,")
+        print(f"    niveau {niveau}), puis placez le fichier ici : {cache_path.resolve()}")
         raise
 
 
@@ -289,7 +313,18 @@ def classifier_valeurs(
     - std      : basé sur l'écart-type
     """
     valeurs = series.dropna()
-    
+
+    # Cas dégénéré : une seule zone ou toutes valeurs identiques → une seule classe
+    if len(valeurs) == 0:
+        raise ValueError("Impossible de classifier une série vide.")
+    if valeurs.nunique() == 1:
+        v = valeurs.iloc[0]
+        bornes = np.array([v - 0.001, v + 0.001])
+        return bornes, [f"{v:.1f}"]
+
+    # Réduire n_classes si moins de zones que de classes demandées
+    n_classes = min(n_classes, len(valeurs))
+
     if methode == "quantile":
         bornes = valeurs.quantile(np.linspace(0, 1, n_classes + 1)).unique()
     elif methode == "jenks":

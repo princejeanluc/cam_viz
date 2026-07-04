@@ -29,6 +29,8 @@ python tests/test_rapide.py
 
 Ce script crée son propre jeu de données factice, télécharge la géométrie des régions du Cameroun, et génère une carte PNG (`test_carte.png`). S'il s'exécute sans erreur, l'installation est correcte.
 
+Pour une découverte guidée du projet, ouvrez [`examples/galerie.ipynb`](examples/galerie.ipynb) dans Jupyter — il reprend chaque étape (carte minimale, validation de la jointure, comparaison de méthodes de classification, zoom, drill-down, nettoyage de données brutes) avec des explications entre les cellules.
+
 Pour vos propres données :
 
 ```python
@@ -80,7 +82,8 @@ camviz/
 │       ├── adapter_dataset.py → nettoyage et normalisation des données brutes
 │       └── export_powerbi.py  → prépare TopoJSON + CSV pour Power BI (Shape Map)
 ├── examples/
-│   └── exemples_utilisation.py → cas d'usage commentés (régions, quartiers, multicouches...)
+│   ├── galerie.ipynb            → notebook pédagogique, du CSV à la carte vérifiée
+│   └── exemples_utilisation.py  → cas d'usage commentés (régions, quartiers, multicouches...)
 ├── tests/
 │   └── test_rapide.py          → script de vérification d'installation, autonome
 └── data/                       → cache local des géométries GADM (créé au premier lancement)
@@ -331,7 +334,7 @@ Le drill-down interactif au clic (région → départements dans le même visuel
 
 **La carte s'affiche, toutes les zones ont une valeur, mais un chiffre semble faux** — un échec de jointure se voit (zone grise). Une mauvaise jointure réussie ne se voit pas : le fuzzy matching peut avoir associé votre donnée à la mauvaise zone sans déclencher d'erreur. Lancez `carte.valider()` et vérifiez les lignes `methode=fuzzy` avec un score faible, ainsi que les messages `[join][ALERTE]` affichés au moment de `charger_metrique()` (collision : deux noms d'origine différents fusionnés vers la même zone).
 
-**Échec du téléchargement GADM** — si le réseau bloque `geodata.ucdavis.edu`, téléchargez manuellement le GeoJSON depuis [gadm.org/download_country.html](https://gadm.org/download_country.html) (choisir Cameroon) et placez le fichier dans `data/cameroun_gadm_niveau{N}.geojson`.
+**Échec du téléchargement GADM (`ConnectionResetError`, `ConnectionError` pendant le handshake TLS)** — `charger_gadm()` retente automatiquement 4 fois avec un délai croissant avant d'abandonner ; ces erreurs sont souvent transitoires (antivirus qui inspecte le HTTPS, réseau d'entreprise, ou serveur GADM temporairement instable) et un nouvel essai (`carte.charger_geo()` à nouveau) suffit parfois. Si l'échec persiste, téléchargez manuellement le GeoJSON depuis [gadm.org/download_country.html](https://gadm.org/download_country.html) (choisir Cameroon) et placez le fichier dans `data/cameroun_gadm_niveau{N}.geojson` — le chemin exact attendu est affiché dans le message d'erreur.
 
 **`thefuzz` non installé** — le matching approximatif des noms de zone est désactivé sans erreur bloquante, mais les noms mal orthographiés (`"extreme nord"` au lieu de `"Extrême-Nord"`) ne seront plus corrigés automatiquement. Installez avec `pip install thefuzz python-Levenshtein`.
 
