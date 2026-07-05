@@ -29,15 +29,17 @@ class Style:
     Passez un objet Style à CarteCameroun(style=...) pour personnaliser le rendu.
 
     Exemple publication (fond blanc, palette sobre) :
-        Style(fond_blanc=True, palette=["#EDF5FF","#9EC8F0","#2E86AB","#1A5276"])
+        Style(fond_blanc=True, palette="froid")
+    Exemple impact (rouge chaleur, haute résolution) :
+        Style(palette="chaleur", dpi=300)
     """
-    # Palette choroplèthe — liste de couleurs hex, ou None pour garder schema_couleur
+    # Palette choroplèthe — liste de hex OU clé de SCHEMAS_COULEUR, ou None
     palette: list = None
 
     # Fonds
-    fond_figure: str = "#F8F8F0"   # marge autour de la carte
-    fond_carte:  str = "#D4E8F4"   # zone eau/fond
-    fond_blanc:  bool = False      # raccourci mode publication
+    fond_figure: str  = "white"     # marge autour de la carte (blanc = propre)
+    fond_carte:  str  = "#EBF5FB"   # zone eau/fond (bleu très pâle)
+    fond_blanc:  bool = False        # raccourci mode publication strict
 
     # Contours
     contours_zones_couleur:    str   = "white"
@@ -45,15 +47,21 @@ class Style:
     contours_pays_couleur:     str   = "#333333"
     contours_pays_epaisseur:   float = 0.3
 
-    # Typographie
-    police:       str   = None     # nom de famille ("Arial") ou chemin vers .ttf
-    taille_titre: int   = 16
-    taille_labels: float = 6.5
-    couleur_titre: str  = "#1A1A1A"
+    # Typographie — hiérarchie fixe pour cohérence entre cartes
+    police:           str   = None   # famille ("Arial") ou None → DejaVu Sans
+    taille_titre:     int   = 15
+    taille_sous_titre: int  = 11
+    taille_labels:    float = 7.0
+    taille_legende:   int   = 8
+    taille_source:    int   = 7
+    couleur_titre:    str   = "#1A1A1A"
 
     # Zones sans données
     manquant_couleur: str = "#D0D0D0"
     manquant_hatch:   str = "///"
+
+    # Décoration
+    bordure_carte: bool = True  # cadre fin #CCCCCC autour de la zone cartographique
 
     # Résolution export
     dpi: int = 180
@@ -61,7 +69,7 @@ class Style:
     def __post_init__(self):
         if self.fond_blanc:
             self.fond_figure = "white"
-            self.fond_carte  = "#F0F0F5"
+            self.fond_carte  = "#F7F9FC"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,16 +350,37 @@ def joindre_metrique(
 # ─────────────────────────────────────────────────────────────────────────────
 
 SCHEMAS_COULEUR = {
-    "sequentiel":   "YlOrRd",     # valeurs de faible à élevée
-    "divergent":    "RdYlGn",     # valeurs autour d'une médiane
-    "qualitatif":   "Set2",       # catégories sans ordre
+    # ── Palettes matplotlib (noms) ─────────────────────────────────────────────
+    "sequentiel":   "YlOrRd",
+    "divergent":    "RdYlGn",
+    "qualitatif":   "Set2",
     "population":   "PuBuGn",
     "pauvrete":     "OrRd",
     "sante":        "YlGn",
     "education":    "Blues",
+    # ── Palettes corporate (listes hex — utilisables via Style(palette="chaleur")) ──
+    "chaleur":     ["#FDEBD0", "#F0B27A", "#E67E22", "#CA6F1E", "#784212"],
+    "froid":       ["#EAF4FB", "#AED6F1", "#3498DB", "#1A5276", "#0D2B45"],
+    "corporatif":  ["#F2F3F4", "#ABB2B9", "#566573", "#2C3E50", "#17202A"],
+    "impact":      ["#FDEDEC", "#F1948A", "#E74C3C", "#922B21", "#641E16"],
+    "vert":        ["#EAFAF1", "#A9DFBF", "#27AE60", "#1E8449", "#145A32"],
 }
 
 METHODES_CLASSIFICATION = ["quantile", "jenks", "égale", "std"]
+
+
+def _formater_valeur(v: float) -> str:
+    """Formate un nombre pour la légende : 1 234 567 → '1.2M', 12 345 → '12K'."""
+    av = abs(v)
+    if av >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if av >= 10_000:
+        return f"{v / 1_000:.0f}K"
+    if av >= 1_000:
+        return f"{v / 1_000:.1f}K"
+    if 0 < av < 1:
+        return f"{v:.2f}"
+    return f"{v:.1f}"
 
 
 def classifier_valeurs(
@@ -408,14 +437,87 @@ def classifier_valeurs(
     bornes[-1] += 0.001   # inclure la valeur maximale
     
     etiquettes = [
-        f"{bornes[i]:.1f} – {bornes[i+1]:.1f}"
+        f"{_formater_valeur(bornes[i])} – {_formater_valeur(bornes[i+1])}"
         for i in range(len(bornes) - 1)
     ]
     return bornes, etiquettes
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. CARTE STATIQUE — Matplotlib / GeoPandas
+# 6. HELPERS VISUELS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _appliquer_typographie(s: "Style"):
+    """Applique une typographie cohérente à la figure courante via rcParams."""
+    famille = s.police or "DejaVu Sans"
+    plt.rcParams.update({
+        "font.family":      "sans-serif",
+        "font.sans-serif":  [famille, "Arial", "Helvetica", "Liberation Sans"],
+        "font.size":        s.taille_legende,
+        "axes.titlesize":   s.taille_titre,
+        "axes.titleweight": "bold",
+        "legend.fontsize":  s.taille_legende,
+        "figure.dpi":       96,
+    })
+
+
+def _construire_legende(ax, patches, style: "Style" = None):
+    """Légende compacte, horizontale, sans titre redondant."""
+    s = style or Style()
+    n = len(patches)
+    ncol = min(n, 5)
+    leg = ax.legend(
+        handles=patches,
+        loc="lower left",
+        bbox_to_anchor=(0.01, 0.01),
+        ncol=ncol,
+        fontsize=s.taille_legende,
+        frameon=True,
+        framealpha=0.92,
+        edgecolor="#DDDDDD",
+        fancybox=False,
+        handlelength=1.0,
+        handleheight=0.75,
+        borderpad=0.5,
+        labelspacing=0.25,
+        columnspacing=0.8,
+    )
+    leg.get_frame().set_linewidth(0.4)
+    return leg
+
+
+def _ajouter_bordure(ax):
+    """Cadre fin #CCCCCC autour de la zone cartographique."""
+    rect = plt.Rectangle(
+        (0, 0), 1, 1,
+        transform=ax.transAxes,
+        fill=False, edgecolor="#CCCCCC", linewidth=0.8, zorder=20,
+    )
+    ax.add_patch(rect)
+
+
+def _resoudre_palette(style: "Style", schema_couleur: str, n: int):
+    """Résout la palette : Style.palette (liste ou clé) > schema_couleur matplotlib."""
+    s = style or Style()
+    raw = s.palette
+    if raw is None:
+        return plt.get_cmap(schema_couleur, n)
+    if isinstance(raw, str):
+        lookup = SCHEMAS_COULEUR.get(raw)
+        if isinstance(lookup, list):
+            raw = lookup
+        elif lookup:
+            return plt.get_cmap(lookup, n)
+        else:
+            raise ValueError(
+                f"Palette inconnue : '{raw}'. "
+                f"Valeurs disponibles : {list(SCHEMAS_COULEUR.keys())}"
+            )
+    return LinearSegmentedColormap.from_list("custom", raw, N=n)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. CARTE STATIQUE — Matplotlib / GeoPandas
 # ─────────────────────────────────────────────────────────────────────────────
 
 def carte_statique(
@@ -454,7 +556,8 @@ def carte_statique(
         sortie                 : chemin de sauvegarde (PNG/SVG)
         figsize                : taille de la figure
     """
-    s = style or Style()  # Style par défaut si rien n'est fourni
+    s = style or Style()
+    _appliquer_typographie(s)
 
     # ── Reprojection ─────────────────────────────────────────────────────────
     gdf_proj = gdf.to_crs(CRS_LOCAL)
@@ -470,7 +573,7 @@ def carte_statique(
             ax=ax, color=s.manquant_couleur,
             edgecolor=s.contours_zones_couleur,
             linewidth=s.contours_zones_epaisseur,
-            hatch=s.manquant_hatch, label="Données manquantes",
+            hatch=s.manquant_hatch,
         )
 
     # ── Classification & palette ─────────────────────────────────────────────
@@ -479,13 +582,7 @@ def carte_statique(
     if not gdf_data.empty:
         valeurs = gdf_data[col_valeur]
         bornes, etiquettes = classifier_valeurs(valeurs, methode_classification, n_classes)
-
-        if s.palette:
-            cmap = LinearSegmentedColormap.from_list(
-                "custom", s.palette, N=len(bornes) - 1
-            )
-        else:
-            cmap = plt.get_cmap(schema_couleur, len(bornes) - 1)
+        cmap = _resoudre_palette(s, schema_couleur, len(bornes) - 1)
         norm = BoundaryNorm(bornes, cmap.N)
 
         gdf_data.plot(
@@ -495,26 +592,21 @@ def carte_statique(
             legend=False,
         )
 
-        # ── Légende manuelle ─────────────────────────────────────────────────
-        patches = []
-        for i, etiq in enumerate(etiquettes):
-            couleur = cmap(i / max(len(etiquettes) - 1, 1))
-            patches.append(mpatches.Patch(
-                facecolor=couleur, edgecolor="grey", linewidth=0.4,
-                label=f"{etiq} {unite}".strip(),
-            ))
+        # ── Légende compacte ─────────────────────────────────────────────────
+        patches = [
+            mpatches.Patch(
+                facecolor=cmap(i / max(len(etiquettes) - 1, 1)),
+                edgecolor="#AAAAAA", linewidth=0.3,
+                label=f"{etiq}{(' ' + unite) if unite else ''}",
+            )
+            for i, etiq in enumerate(etiquettes)
+        ]
         if not gdf_manquant.empty:
             patches.append(mpatches.Patch(
                 facecolor=s.manquant_couleur, hatch=s.manquant_hatch,
-                edgecolor="grey", linewidth=0.4, label="Données manquantes",
+                edgecolor="#AAAAAA", linewidth=0.3, label="N/D",
             ))
-        leg = ax.legend(
-            handles=patches, loc="lower left",
-            title=f"Légende ({methode_classification})",
-            title_fontsize=9, fontsize=8,
-            framealpha=0.95, edgecolor="#CCCCCC", fancybox=False,
-        )
-        leg.get_frame().set_linewidth(0.5)
+        _construire_legende(ax, patches, s)
 
     # ── Contour pays ─────────────────────────────────────────────────────────
     if afficher_contour_pays:
@@ -550,26 +642,29 @@ def carte_statique(
     # ── Titre + sous-titre ───────────────────────────────────────────────────
     ax.set_title(
         titre,
-        fontsize=s.taille_titre, fontweight="bold", pad=18,
+        fontsize=s.taille_titre, fontweight="bold", pad=14,
         color=s.couleur_titre,
         fontfamily=s.police or "sans-serif",
     )
     if sous_titre:
         ax.text(
-            0.5, 1.01, sous_titre,
+            0.5, 1.005, sous_titre,
             transform=ax.transAxes,
-            fontsize=s.taille_titre - 4, color="#555555",
+            fontsize=s.taille_sous_titre, color="#555555",
             ha="center", va="bottom",
             fontfamily=s.police or "sans-serif",
         )
 
     ax.axis("off")
+    if s.bordure_carte:
+        _ajouter_bordure(ax)
 
     # ── Rose des vents ────────────────────────────────────────────────────────
     ax.annotate("N", xy=(0.97, 0.97), xycoords="axes fraction",
-                fontsize=14, ha="center", va="center", fontweight="bold")
+                fontsize=12, ha="center", va="center", fontweight="bold",
+                color="#444444")
     ax.annotate("↑", xy=(0.97, 0.94), xycoords="axes fraction",
-                fontsize=20, ha="center", va="center")
+                fontsize=18, ha="center", va="center", color="#444444")
 
     # ── Barre d'échelle ───────────────────────────────────────────────────────
     _ajouter_echelle(ax, gdf_proj)
@@ -577,14 +672,13 @@ def carte_statique(
     # ── Source ────────────────────────────────────────────────────────────────
     texte_source = source if source is not None else "Source : GADM v4.1"
     ax.text(0.01, 0.01, texte_source,
-            transform=ax.transAxes, fontsize=7, color="#888888")
+            transform=ax.transAxes, fontsize=s.taille_source, color="#999999")
 
-    plt.tight_layout()
+    plt.tight_layout(pad=1.2)
 
     if sortie:
-        dpi = s.dpi if style else 180
-        fig.savefig(sortie, dpi=dpi, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
+        fig.savefig(sortie, dpi=s.dpi, bbox_inches="tight",
+                    pad_inches=0.15, facecolor=fig.get_facecolor())
         logger.info(f"[ok] Carte sauvegardée : {sortie}")
 
     return fig
@@ -1587,6 +1681,7 @@ def _carte_avec_contexte(
     Le fond donne le contexte géographique, la zone d'intérêt ressort clairement.
     """
     s = style or Style()
+    _appliquer_typographie(s)
 
     gdf_contexte_proj = gdf_contexte.to_crs(CRS_LOCAL)
     gdf_focus_proj    = gdf_focus.to_crs(CRS_LOCAL)
@@ -1615,12 +1710,7 @@ def _carte_avec_contexte(
     if not gdf_data.empty:
         valeurs = gdf_data["valeur"]
         bornes, etiquettes = classifier_valeurs(valeurs, methode_classification, n_classes)
-        if s.palette:
-            cmap = LinearSegmentedColormap.from_list(
-                "custom", s.palette, N=len(bornes) - 1
-            )
-        else:
-            cmap = plt.get_cmap(schema_couleur, len(bornes) - 1)
+        cmap = _resoudre_palette(s, schema_couleur, len(bornes) - 1)
         norm = BoundaryNorm(bornes, cmap.N)
 
         gdf_data.plot(
@@ -1633,21 +1723,17 @@ def _carte_avec_contexte(
         patches = [
             mpatches.Patch(
                 facecolor=cmap(i / max(len(etiquettes) - 1, 1)),
-                edgecolor="grey", linewidth=0.4,
-                label=f"{e} {unite}".strip(),
+                edgecolor="#AAAAAA", linewidth=0.3,
+                label=f"{e}{(' ' + unite) if unite else ''}",
             )
             for i, e in enumerate(etiquettes)
         ]
         if not gdf_manq.empty:
             patches.append(mpatches.Patch(
                 facecolor=s.manquant_couleur, hatch=s.manquant_hatch,
-                edgecolor="grey", linewidth=0.4, label="Données manquantes",
+                edgecolor="#AAAAAA", linewidth=0.3, label="N/D",
             ))
-        leg = ax.legend(handles=patches, loc="lower left",
-                        title=f"Légende ({methode_classification})",
-                        title_fontsize=9, fontsize=8,
-                        framealpha=0.95, edgecolor="#CCCCCC", fancybox=False)
-        leg.get_frame().set_linewidth(0.5)
+        _construire_legende(ax, patches, s)
 
     # ── Contour de surbrillance ───────────────────────────────────────────────
     gdf_focus_proj.boundary.plot(
@@ -1679,14 +1765,14 @@ def _carte_avec_contexte(
 
     # ── Titre + sous-titre ────────────────────────────────────────────────────
     ax.set_title(
-        titre, fontsize=s.taille_titre, fontweight="bold", pad=18,
+        titre, fontsize=s.taille_titre, fontweight="bold", pad=14,
         color=s.couleur_titre, fontfamily=s.police or "sans-serif",
     )
     if sous_titre:
         ax.text(
-            0.5, 1.01, sous_titre,
+            0.5, 1.005, sous_titre,
             transform=ax.transAxes,
-            fontsize=s.taille_titre - 4, color="#555555",
+            fontsize=s.taille_sous_titre, color="#555555",
             ha="center", va="bottom",
             fontfamily=s.police or "sans-serif",
         )
@@ -1698,17 +1784,20 @@ def _carte_avec_contexte(
     ax.set_ylim(ymin - my, ymax + my)
 
     ax.axis("off")
+    if s.bordure_carte:
+        _ajouter_bordure(ax)
     _ajouter_echelle(ax, gdf_focus_proj)
 
     texte_source = source if source is not None else f"Focus : {zone_focus} | Source : GADM v4.1"
     ax.text(0.99, 0.01, texte_source,
-            transform=ax.transAxes, fontsize=7, color="#888888", ha="right")
+            transform=ax.transAxes, fontsize=s.taille_source,
+            color="#999999", ha="right")
 
-    plt.tight_layout()
+    plt.tight_layout(pad=1.2)
 
     if sortie:
         fig.savefig(sortie, dpi=s.dpi, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
+                    pad_inches=0.15, facecolor=fig.get_facecolor())
         logger.info(f"[ok] Carte sauvegardée : {sortie}")
 
     return fig
