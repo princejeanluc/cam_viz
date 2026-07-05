@@ -40,6 +40,7 @@ from .cameroun_viz import (
     CRS_GLOBAL,
     REGIONS_OFFICIELLES,
     SCHEMAS_COULEUR,
+    METHODES_CLASSIFICATION,
     SYMBOLES_PREDEFINIS,
 )
 from .adapter_dataset import (
@@ -67,6 +68,7 @@ __all__ = [
     "CRS_GLOBAL",
     "REGIONS_OFFICIELLES",
     "SCHEMAS_COULEUR",
+    "METHODES_CLASSIFICATION",
     "diagnostiquer_dataset",
     "adapter_dataset",
     "normaliser_nom",

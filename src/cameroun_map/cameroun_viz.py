@@ -496,6 +496,33 @@ def _ajouter_bordure(ax):
     ax.add_patch(rect)
 
 
+def _ajouter_message_cle(ax, message: str, style: "Style" = None):
+    """
+    Bandeau insight McKinsey : fond coloré pleine largeur + barre d'accent + texte bold.
+    Placé juste au-dessus de la carte (y > 1 en coordonnées axes, clip_on=False).
+    """
+    s = style or Style()
+    y0, h = 1.013, 0.046
+    # Fond pleine largeur
+    ax.add_patch(plt.Rectangle(
+        (0, y0), 1, h,
+        transform=ax.transAxes, clip_on=False,
+        facecolor="#EAF4FB", edgecolor="none", zorder=15,
+    ))
+    # Barre d'accent gauche
+    ax.add_patch(plt.Rectangle(
+        (0, y0), 0.006, h,
+        transform=ax.transAxes, clip_on=False,
+        facecolor="#1A5276", edgecolor="none", zorder=16,
+    ))
+    ax.text(
+        0.013, y0 + h / 2, message,
+        transform=ax.transAxes, clip_on=False, zorder=17,
+        fontsize=s.taille_sous_titre, color="#1A3A4A", fontweight="bold",
+        fontfamily=s.police or "sans-serif", va="center", ha="left",
+    )
+
+
 def _resoudre_palette(style: "Style", schema_couleur: str, n: int):
     """Résout la palette : Style.palette (liste ou clé) > schema_couleur matplotlib."""
     s = style or Style()
@@ -537,6 +564,7 @@ def carte_statique(
     style: "Style" = None,
     sous_titre: str = None,
     source: str = None,
+    message_cle: str = None,
     couches: list = None,
 ) -> plt.Figure:
     """
@@ -639,21 +667,26 @@ def carte_statique(
     if couches:
         _rendre_couches(ax, couches, gdf_proj, col_nom, CRS_LOCAL)
 
-    # ── Titre + sous-titre ───────────────────────────────────────────────────
+    # ── Titre ────────────────────────────────────────────────────────────────
+    # pad agrandi quand message_cle est présent pour laisser de la place au bandeau
+    titre_pad = 52 if message_cle else 14
     ax.set_title(
         titre,
-        fontsize=s.taille_titre, fontweight="bold", pad=14,
+        fontsize=s.taille_titre, fontweight="bold", pad=titre_pad,
         color=s.couleur_titre,
         fontfamily=s.police or "sans-serif",
     )
     if sous_titre:
+        y_st = 1.075 if message_cle else 1.005
         ax.text(
-            0.5, 1.005, sous_titre,
+            0.5, y_st, sous_titre,
             transform=ax.transAxes,
             fontsize=s.taille_sous_titre, color="#555555",
             ha="center", va="bottom",
             fontfamily=s.police or "sans-serif",
         )
+    if message_cle:
+        _ajouter_message_cle(ax, message_cle, s)
 
     ax.axis("off")
     if s.bordure_carte:
@@ -750,6 +783,8 @@ def _rendre_couches(
             _rendre_couche_symboles(ax, couche, gdf_proj, col_nom, crs_proj)
         elif couche["type"] == "annotation":
             _rendre_couche_annotation(ax, couche, gdf_proj, col_nom, crs_proj)
+        elif couche["type"] == "symboles_prop":
+            _rendre_couche_symboles_prop(ax, couche, gdf_proj, col_nom, crs_proj)
 
 
 def _rendre_couche_symboles(ax, couche, gdf_proj, col_nom, crs_proj):
@@ -868,6 +903,59 @@ def _rendre_couche_annotation(ax, couche, gdf_proj, col_nom, crs_proj):
     else:  # "valeur" — texte simple sans boîte
         ax.text(x, y, texte, fontsize=taille, color=coul_texte,
                 ha="center", va="center", zorder=zorder, fontweight="bold")
+
+
+def _rendre_couche_symboles_prop(ax, couche, gdf_proj, col_nom, crs_proj):
+    """
+    Dessine des cercles proportionnels centrés sur chaque zone.
+    Rayon ∝ sqrt(valeur) pour que l'AIRE soit proportionnelle à la valeur.
+    """
+    col_valeur   = couche["col_valeur"]
+    couleur      = couche.get("couleur", "#E74C3C")
+    alpha        = couche.get("alpha", 0.55)
+    echelle      = couche.get("echelle", 1.0)
+    afficher_val = couche.get("afficher_valeur", True)
+    zorder       = couche.get("zorder", 7)
+
+    gdf_work = gdf_proj.copy()
+    if col_valeur not in gdf_work.columns:
+        logger.warning(f"[warn] symboles_prop : colonne '{col_valeur}' absente du GeoDataFrame")
+        return
+
+    valeurs = gdf_work[col_valeur].dropna()
+    if valeurs.empty:
+        return
+
+    v_max = valeurs.max()
+    if v_max == 0:
+        return
+
+    # Rayon max exprimé en unités de projection (mètres en UTM32N)
+    xmin, ymin, xmax, ymax = gdf_work.total_bounds
+    r_max = (xmax - xmin) * 0.06 * echelle  # 6% de la largeur de la carte
+
+    for _, row in gdf_work.iterrows():
+        if row.geometry is None or pd.isna(row.get(col_valeur)):
+            continue
+        v = row[col_valeur]
+        if v <= 0:
+            continue
+        r = r_max * np.sqrt(v / v_max)
+        cx, cy = row.geometry.centroid.x, row.geometry.centroid.y
+        circle = plt.Circle(
+            (cx, cy), r,
+            facecolor=couleur, edgecolor="white",
+            linewidth=0.8, alpha=alpha, zorder=zorder,
+        )
+        ax.add_patch(circle)
+        if afficher_val:
+            label = _formater_valeur(v)
+            ax.text(
+                cx, cy, label,
+                ha="center", va="center",
+                fontsize=6.5, color="white", fontweight="bold",
+                zorder=zorder + 1,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1534,6 +1622,45 @@ class CarteCameroun:
         })
         return self
 
+    def ajouter_symboles_proportionnels(
+        self,
+        col_valeur: str = "valeur",
+        couleur: str = "#E74C3C",
+        alpha: float = 0.55,
+        echelle: float = 1.0,
+        afficher_valeur: bool = True,
+        zorder: int = 7,
+    ) -> "CarteCameroun":
+        """
+        Superpose des cercles proportionnels sur la carte choroplèthe.
+        L'aire de chaque cercle est proportionnelle à la valeur de la zone,
+        ce qui permet d'afficher une 2ᵉ variable en plus de la couleur.
+
+        col_valeur      : colonne numérique du GeoDataFrame joint
+        couleur         : couleur des cercles (hex ou nom)
+        alpha           : transparence (0=invisible, 1=opaque)
+        echelle         : facteur de taille global (1.0 = auto, 0.5 = moitié)
+        afficher_valeur : écrire la valeur formatée au centre du cercle
+        zorder          : ordre de superposition (> 3 pour être au-dessus du fond)
+
+        Retourne self pour permettre le chaînage.
+
+        Exemple :
+            carte.charger_geo().charger_metrique(df)
+            carte.ajouter_symboles_proportionnels(col_valeur="population")
+            carte.visualiser(titre="Taux de pauvreté + population")
+        """
+        self._couches.append({
+            "type":             "symboles_prop",
+            "col_valeur":       col_valeur,
+            "couleur":          couleur,
+            "alpha":            alpha,
+            "echelle":          echelle,
+            "afficher_valeur":  afficher_valeur,
+            "zorder":           zorder,
+        })
+        return self
+
     def reinitialiser_couches(self) -> "CarteCameroun":
         """Efface toutes les couches superposées accumulées."""
         self._couches = []
@@ -1552,6 +1679,7 @@ class CarteCameroun:
         afficher_contexte: bool = True,
         sous_titre: str = None,
         source: str = None,
+        message_cle: str = None,
         sortie: str = None,
         **kwargs
     ) -> plt.Figure:
@@ -1587,6 +1715,7 @@ class CarteCameroun:
                 style=self.style,
                 sous_titre=sous_titre,
                 source=source,
+                message_cle=message_cle,
                 couches=self._couches or None,
             )
 
@@ -1603,9 +1732,293 @@ class CarteCameroun:
             style=self.style,
             sous_titre=sous_titre,
             source=source,
+            message_cle=message_cle,
             couches=self._couches or None,
             **kwargs
         )
+
+    def visualiser_multiples(
+        self,
+        col_valeurs: list,
+        titres: list = None,
+        unite: str = "",
+        methode: str = "quantile",
+        n_classes: int = 5,
+        schema_couleur: str = "YlOrRd",
+        style: "Style" = None,
+        source: str = None,
+        sortie: str = None,
+        figsize_par_carte: tuple = (6, 7),
+    ) -> plt.Figure:
+        """
+        Affiche plusieurs indicateurs côte à côte (petits multiples).
+        Chaque colonne de col_valeurs produit une mini-carte avec la même échelle visuelle.
+
+        col_valeurs      : liste de colonnes numériques du GeoDataFrame joint
+                           ex: ["taux_scolarisation", "taux_pauvrete", "acces_eau"]
+        titres           : titres des sous-cartes (même longueur que col_valeurs)
+        figsize_par_carte: taille individuelle de chaque mini-carte en pouces
+
+        Exemple :
+            carte.charger_geo().charger_metrique(df_large)
+            carte.visualiser_multiples(
+                col_valeurs=["scolarisation", "pauvrete", "sante"],
+                titres=["Scolarisation (%)", "Pauvreté (%)", "Santé"],
+                sortie="comparaison.png",
+            )
+        """
+        if self.gdf_joint is None:
+            raise CarteCamerounError(
+                "Les données ne sont pas chargées. "
+                "Appelez charger_metrique() avant cette méthode."
+            )
+
+        n = len(col_valeurs)
+        if n == 0:
+            raise ValueError("col_valeurs ne peut pas être vide.")
+        if titres is None:
+            titres = col_valeurs
+        if len(titres) != n:
+            raise ValueError("titres doit avoir la même longueur que col_valeurs.")
+
+        s = style or self.style or Style()
+        _appliquer_typographie(s)
+
+        w, h = figsize_par_carte
+        fig, axes = plt.subplots(1, n, figsize=(w * n, h))
+        if n == 1:
+            axes = [axes]
+        fig.patch.set_facecolor(s.fond_figure)
+
+        gdf_proj = self.gdf_joint.to_crs(CRS_LOCAL)
+
+        for ax, col, titre in zip(axes, col_valeurs, titres):
+            ax.set_facecolor(s.fond_carte)
+            ax.axis("off")
+
+            if col not in gdf_proj.columns:
+                ax.set_title(f"{titre}\n(colonne absente)", fontsize=s.taille_titre - 2,
+                             color="#CC0000")
+                continue
+
+            gdf_data = gdf_proj[gdf_proj[col].notna()].copy()
+            gdf_manq = gdf_proj[gdf_proj[col].isna()]
+
+            if not gdf_manq.empty:
+                gdf_manq.plot(ax=ax, color=s.manquant_couleur,
+                              edgecolor=s.contours_zones_couleur,
+                              linewidth=s.contours_zones_epaisseur,
+                              hatch=s.manquant_hatch)
+
+            if not gdf_data.empty:
+                bornes, etiquettes = classifier_valeurs(gdf_data[col], methode, n_classes)
+                cmap = _resoudre_palette(s, schema_couleur, len(bornes) - 1)
+                norm = BoundaryNorm(bornes, cmap.N)
+                gdf_data.plot(ax=ax, column=col, cmap=cmap, norm=norm,
+                              edgecolor=s.contours_zones_couleur,
+                              linewidth=s.contours_zones_epaisseur,
+                              legend=False)
+                # Mini-légende sous la carte
+                patches = [
+                    mpatches.Patch(
+                        facecolor=cmap(i / max(len(etiquettes) - 1, 1)),
+                        edgecolor="#AAAAAA", linewidth=0.3,
+                        label=f"{e}{(' ' + unite) if unite else ''}",
+                    )
+                    for i, e in enumerate(etiquettes)
+                ]
+                ax.legend(handles=patches, loc="lower left", bbox_to_anchor=(0, 0),
+                          ncol=min(len(patches), 3), fontsize=6.5,
+                          frameon=True, framealpha=0.9, edgecolor="#DDDDDD",
+                          fancybox=False, handlelength=0.8, handleheight=0.7,
+                          borderpad=0.4, labelspacing=0.2, columnspacing=0.6)
+
+            ax.set_title(titre, fontsize=s.taille_titre - 2, fontweight="bold",
+                         pad=8, color=s.couleur_titre,
+                         fontfamily=s.police or "sans-serif")
+            if s.bordure_carte:
+                _ajouter_bordure(ax)
+
+        # Source commune en bas de la figure
+        texte_source = source if source is not None else "Source : GADM v4.1"
+        fig.text(0.5, 0.01, texte_source, ha="center",
+                 fontsize=s.taille_source, color="#999999")
+
+        plt.tight_layout(pad=1.2)
+
+        if sortie:
+            fig.savefig(sortie, dpi=s.dpi, bbox_inches="tight",
+                        pad_inches=0.15, facecolor=fig.get_facecolor())
+            logger.info(f"[ok] Petits multiples sauvegardés : {sortie}")
+
+        return fig
+
+    def visualiser_bivariee(
+        self,
+        col_x: str,
+        col_y: str,
+        titre: str = "Carte bivariée",
+        label_x: str = None,
+        label_y: str = None,
+        n_classes: int = 3,
+        palette_bv: list = None,
+        style: "Style" = None,
+        source: str = None,
+        message_cle: str = None,
+        sortie: str = None,
+        figsize: tuple = (13, 14),
+    ) -> plt.Figure:
+        """
+        Carte bivariée : deux variables encodées simultanément par une matrice de couleurs n×n.
+        Typiquement utilisée pour montrer la corrélation spatiale entre deux indicateurs.
+
+        col_x, col_y : colonnes numériques du GeoDataFrame joint
+        label_x/y    : libellés pour la légende (défaut = nom de colonne)
+        n_classes    : dimension de la matrice (2, 3 ou 4 — 3 recommandé)
+        palette_bv   : matrice de couleurs n×n sous forme de liste de n² hex
+                       (ligne 0 = faible col_x ; colonne 0 = faible col_y)
+                       Défaut : bleu (col_x) × orange (col_y)
+
+        Exemple :
+            carte.charger_geo().charger_metrique(df)
+            carte.visualiser_bivariee(
+                col_x="taux_pauvrete",
+                col_y="densite_pop",
+                titre="Pauvreté × Densité",
+                label_x="Pauvreté", label_y="Densité",
+                message_cle="Le Littoral cumule forte densité et faible pauvreté",
+            )
+        """
+        if self.gdf_joint is None:
+            raise CarteCamerounError(
+                "Les données ne sont pas chargées. "
+                "Appelez charger_metrique() avant cette méthode."
+            )
+        for col in (col_x, col_y):
+            if col not in self.gdf_joint.columns:
+                raise ValueError(
+                    f"Colonne '{col}' absente du GeoDataFrame joint. "
+                    f"Colonnes disponibles : {list(self.gdf_joint.columns)}"
+                )
+
+        s = style or self.style or Style()
+        _appliquer_typographie(s)
+        lx = label_x or col_x
+        ly = label_y or col_y
+
+        # ── Palette bivariée par défaut : bleu × orange ──────────────────────
+        # Matrice n×n : ligne i = classe de col_x (0=faible→n-1=élevé)
+        #               col  j = classe de col_y (0=faible→n-1=élevé)
+        if palette_bv is None:
+            if n_classes == 3:
+                palette_bv = [
+                    "#E8E8E8", "#ACE4E4", "#5AC8C8",  # col_x faible
+                    "#DFB0D6", "#A5ADD3", "#5698B9",  # col_x moyen
+                    "#BE64AC", "#8C62AA", "#3B4994",  # col_x élevé
+                ]
+            elif n_classes == 2:
+                palette_bv = ["#E8E8E8", "#73AE80", "#6C83B5", "#2A5A5B"]
+            else:
+                raise ValueError(
+                    f"n_classes={n_classes} non supporté avec la palette par défaut. "
+                    "Fournissez palette_bv manuellement ou utilisez n_classes=2 ou 3."
+                )
+
+        if len(palette_bv) != n_classes ** 2:
+            raise ValueError(
+                f"palette_bv doit contenir {n_classes**2} couleurs pour n_classes={n_classes}."
+            )
+
+        # ── Classification des deux variables ────────────────────────────────
+        gdf = self.gdf_joint.copy()
+        gdf_proj = gdf.to_crs(CRS_LOCAL)
+
+        def _classe(series, n):
+            """Retourne la classe quantile (0 à n-1) pour chaque valeur."""
+            quantiles = np.linspace(0, 1, n + 1)
+            bornes = series.quantile(quantiles).unique()
+            n_eff = len(bornes) - 1
+            cls = pd.cut(series, bins=bornes, labels=False, include_lowest=True)
+            return cls.clip(0, n_eff - 1).fillna(-1).astype(int)
+
+        valx = gdf_proj[col_x]
+        valy = gdf_proj[col_y]
+        gdf_proj["_cls_x"] = _classe(valx.dropna().reindex(valx.index, fill_value=np.nan), n_classes)
+        gdf_proj["_cls_y"] = _classe(valy.dropna().reindex(valy.index, fill_value=np.nan), n_classes)
+
+        def _couleur_bv(row):
+            cx, cy = row["_cls_x"], row["_cls_y"]
+            if cx < 0 or cy < 0:
+                return s.manquant_couleur
+            return palette_bv[cx * n_classes + cy]
+
+        gdf_proj["_couleur_bv"] = gdf_proj.apply(_couleur_bv, axis=1)
+
+        # ── Rendu ─────────────────────────────────────────────────────────────
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        fig.patch.set_facecolor(s.fond_figure)
+        ax.set_facecolor(s.fond_carte)
+
+        gdf_proj.plot(
+            ax=ax, color=gdf_proj["_couleur_bv"],
+            edgecolor=s.contours_zones_couleur,
+            linewidth=s.contours_zones_epaisseur,
+        )
+
+        # ── Légende bivariée (carré n×n en bas à gauche) ─────────────────────
+        leg_x0, leg_y0 = 0.02, 0.02   # coin bas-gauche en coordonnées axes
+        cell = 0.045                   # taille d'une cellule
+        for i in range(n_classes):
+            for j in range(n_classes):
+                couleur = palette_bv[i * n_classes + j]
+                rect = plt.Rectangle(
+                    (leg_x0 + j * cell, leg_y0 + i * cell), cell, cell,
+                    transform=ax.transAxes, clip_on=False,
+                    facecolor=couleur, edgecolor="white", linewidth=0.5, zorder=20,
+                )
+                ax.add_patch(rect)
+
+        # Flèches et labels des axes de la légende
+        arr_kw = dict(transform=ax.transAxes, clip_on=False,
+                      arrowprops=dict(arrowstyle="->", color="#333333", lw=1.0),
+                      fontsize=7.5, color="#333333", zorder=21)
+        ax.annotate(
+            f"→ {lx}", xytext=(leg_x0, leg_y0 - 0.025),
+            xy=(leg_x0 + n_classes * cell, leg_y0 - 0.025),
+            ha="left", va="center", **arr_kw,
+        )
+        ax.annotate(
+            f"↑ {ly}", xytext=(leg_x0 - 0.025, leg_y0),
+            xy=(leg_x0 - 0.025, leg_y0 + n_classes * cell),
+            ha="center", va="bottom", rotation=90, **arr_kw,
+        )
+
+        # ── Titre ─────────────────────────────────────────────────────────────
+        titre_pad = 52 if message_cle else 14
+        ax.set_title(
+            titre, fontsize=s.taille_titre, fontweight="bold", pad=titre_pad,
+            color=s.couleur_titre, fontfamily=s.police or "sans-serif",
+        )
+        if message_cle:
+            _ajouter_message_cle(ax, message_cle, s)
+
+        ax.axis("off")
+        if s.bordure_carte:
+            _ajouter_bordure(ax)
+
+        texte_source = source if source is not None else "Source : GADM v4.1"
+        ax.text(0.99, 0.01, texte_source,
+                transform=ax.transAxes, fontsize=s.taille_source,
+                color="#999999", ha="right")
+
+        plt.tight_layout(pad=1.2)
+
+        if sortie:
+            fig.savefig(sortie, dpi=s.dpi, bbox_inches="tight",
+                        pad_inches=0.15, facecolor=fig.get_facecolor())
+            logger.info(f"[ok] Carte bivariée sauvegardée : {sortie}")
+
+        return fig
 
     def visualiser_interactif(
         self,
@@ -1671,6 +2084,7 @@ def _carte_avec_contexte(
     style: "Style" = None,
     sous_titre: str = None,
     source: str = None,
+    message_cle: str = None,
     couches: list = None,
 ) -> plt.Figure:
     """
@@ -1763,19 +2177,23 @@ def _carte_avec_contexte(
     if couches:
         _rendre_couches(ax, couches, gdf_focus_proj, col_nom, CRS_LOCAL)
 
-    # ── Titre + sous-titre ────────────────────────────────────────────────────
+    # ── Titre ────────────────────────────────────────────────────────────────
+    titre_pad = 52 if message_cle else 14
     ax.set_title(
-        titre, fontsize=s.taille_titre, fontweight="bold", pad=14,
+        titre, fontsize=s.taille_titre, fontweight="bold", pad=titre_pad,
         color=s.couleur_titre, fontfamily=s.police or "sans-serif",
     )
     if sous_titre:
+        y_st = 1.075 if message_cle else 1.005
         ax.text(
-            0.5, 1.005, sous_titre,
+            0.5, y_st, sous_titre,
             transform=ax.transAxes,
             fontsize=s.taille_sous_titre, color="#555555",
             ha="center", va="bottom",
             fontfamily=s.police or "sans-serif",
         )
+    if message_cle:
+        _ajouter_message_cle(ax, message_cle, s)
 
     # ── Zoom + cadrage sur la zone focalisée ─────────────────────────────────
     xmin, ymin, xmax, ymax = gdf_focus_proj.total_bounds
