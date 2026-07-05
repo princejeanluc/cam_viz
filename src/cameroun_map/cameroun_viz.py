@@ -17,6 +17,7 @@ import plotly.express as px
 import requests, zipfile, io, os, re
 from pathlib import Path
 from dataclasses import dataclass, field
+import logging
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -61,6 +62,17 @@ class Style:
         if self.fond_blanc:
             self.fond_figure = "white"
             self.fond_carte  = "#F0F0F5"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXCEPTIONS & LOGGING
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CarteCamerounError(RuntimeError):
+    """Exception levée par la librairie cameroun_map avec un message actionnable."""
+
+
+logger = logging.getLogger("cameroun_map")
 
 try:
     from thefuzz import process as fuzzy_process   # pip install thefuzz
@@ -140,12 +152,12 @@ def charger_gadm(niveau: int = 1, forcer_telechargement: bool = False) -> gpd.Ge
     cache_path = DATA_DIR / f"cameroun_gadm_niveau{niveau}.geojson"
 
     if cache_path.exists() and not forcer_telechargement:
-        print(f"[cache] Chargement GADM niveau {niveau} depuis {cache_path}")
+        logger.info(f"[cache] Chargement GADM niveau {niveau} depuis {cache_path}")
         return gpd.read_file(cache_path)
 
     # URL officielle GADM v4.1
     url = f"https://geodata.ucdavis.edu/gadm/gadm4.1/json/gadm41_CMR_{niveau}.json"
-    print(f"[download] Téléchargement GADM niveau {niveau} : {url}")
+    logger.info(f"[download] Téléchargement GADM niveau {niveau} : {url}")
 
     try:
         session = _session_avec_retries()
@@ -153,15 +165,15 @@ def charger_gadm(niveau: int = 1, forcer_telechargement: bool = False) -> gpd.Ge
         resp.raise_for_status()
         gdf = gpd.read_file(io.BytesIO(resp.content))
         gdf.to_file(cache_path, driver="GeoJSON")
-        print(f"[ok] {len(gdf)} entités chargées, sauvegardées dans {cache_path}")
+        logger.info(f"[ok] {len(gdf)} entités chargées, sauvegardées dans {cache_path}")
         return gdf
     except Exception as e:
-        print(f"[erreur] Téléchargement échoué après plusieurs tentatives : {e}")
-        print("  Causes fréquentes : pare-feu d'entreprise, antivirus qui inspecte le HTTPS,")
-        print("  ou serveur GADM temporairement instable.")
-        print("  → Solution de contournement : téléchargez le GeoJSON manuellement sur")
-        print("    https://gadm.org/download_country.html (choisir Cameroon, format GeoJSON,")
-        print(f"    niveau {niveau}), puis placez le fichier ici : {cache_path.resolve()}")
+        logger.error(
+            f"Téléchargement GADM échoué après plusieurs tentatives : {e}\n"
+            "  Causes fréquentes : pare-feu, antivirus HTTPS, ou serveur GADM instable.\n"
+            "  → Téléchargement manuel : https://gadm.org/download_country.html\n"
+            f"    Placez le fichier ici : {cache_path.resolve()}"
+        )
         raise
 
 
@@ -180,7 +192,7 @@ def charger_osm_quartiers(ville: str = "Douala") -> gpd.GeoDataFrame:
     );
     out geom;
     """
-    print(f"[osm] Requête Overpass pour {ville}...")
+    logger.info(f"[osm] Requête Overpass pour {ville}...")
     try:
         resp = requests.post(overpass_url, data=query, timeout=90)
         data = resp.json()
@@ -205,16 +217,16 @@ def charger_osm_quartiers(ville: str = "Douala") -> gpd.GeoDataFrame:
                         pass
         
         if not rows:
-            print(f"[osm] Aucun quartier trouvé pour {ville}. Vérifiez la requête Overpass.")
+            logger.info(f"[osm] Aucun quartier trouvé pour {ville}. Vérifiez la requête Overpass.")
             return gpd.GeoDataFrame()
         
         gdf = gpd.GeoDataFrame(rows, crs=CRS_GLOBAL)
         cache_path = DATA_DIR / f"osm_{ville.lower()}_quartiers.geojson"
         gdf.to_file(cache_path, driver="GeoJSON")
-        print(f"[ok] {len(gdf)} quartiers OSM chargés pour {ville}")
+        logger.info(f"[ok] {len(gdf)} quartiers OSM chargés pour {ville}")
         return gdf
     except Exception as e:
-        print(f"[erreur] OSM Overpass : {e}")
+        logger.error(f"[erreur] OSM Overpass : {e}")
         return gpd.GeoDataFrame()
 
 
@@ -320,7 +332,7 @@ def joindre_metrique(
     n_manquant = result["manquant"].sum()
     if n_manquant > 0:
         zones = result.loc[result["manquant"], col_geo].tolist()
-        print(f"[join] {n_manquant} zone(s) sans données : {zones}")
+        logger.warning(f"[join] {n_manquant} zone(s) sans données : {zones}")
 
     return result
 
@@ -377,7 +389,7 @@ def classifier_valeurs(
             jnb = mapclassify.NaturalBreaks(valeurs, k=n_classes)
             bornes = np.concatenate([[valeurs.min()], jnb.bins])
         except ImportError:
-            print("[warn] mapclassify non installé → bascule sur quantile")
+            logger.warning("[warn] mapclassify non installé → bascule sur quantile")
             bornes = valeurs.quantile(np.linspace(0, 1, n_classes + 1)).unique()
     elif methode == "égale":
         bornes = np.linspace(valeurs.min(), valeurs.max(), n_classes + 1)
@@ -573,7 +585,7 @@ def carte_statique(
         dpi = s.dpi if style else 180
         fig.savefig(sortie, dpi=dpi, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
-        print(f"[ok] Carte sauvegardée : {sortie}")
+        logger.info(f"[ok] Carte sauvegardée : {sortie}")
 
     return fig
 
@@ -690,7 +702,7 @@ def _rendre_couche_symboles(ax, couche, gdf_proj, col_nom, crs_proj):
                 )
                 ax.add_artist(ab)
             except Exception as e:
-                print(f"[symboles] Impossible de charger l'image '{chemin}' : {e}")
+                logger.error(f"[symboles] Impossible de charger l'image '{chemin}' : {e}")
         else:
             # Symbole unicode → ax.text ; marqueur matplotlib → ax.plot
             if sym in SYMBOLES_PREDEFINIS and SYMBOLES_PREDEFINIS[sym] == sym:
@@ -723,7 +735,7 @@ def _rendre_couche_annotation(ax, couche, gdf_proj, col_nom, crs_proj):
         try:
             x, y = _coords_zone(cible, gdf_proj, col_nom)
         except ValueError:
-            print(f"[annotation] Zone '{cible}' introuvable — ignorée.")
+            logger.info(f"[annotation] Zone '{cible}' introuvable — ignorée.")
             return
     else:
         # (lon, lat) tuple
@@ -902,7 +914,7 @@ def carte_interactive_folium(
     
     if sortie:
         m.save(sortie)
-        print(f"[ok] Carte interactive sauvegardée : {sortie}")
+        logger.info(f"[ok] Carte interactive sauvegardée : {sortie}")
     
     return m
 
@@ -972,7 +984,7 @@ def carte_plotly(
     
     if sortie:
         fig.write_html(sortie)
-        print(f"[ok] Carte Plotly sauvegardée : {sortie}")
+        logger.info(f"[ok] Carte Plotly sauvegardée : {sortie}")
     
     return fig
 
@@ -1026,6 +1038,17 @@ class CarteCameroun:
         self._col_nom  = None
         self._couches: list = []   # couches superposées accumulées
     
+    def __repr__(self) -> str:
+        geo = f"zones={len(self.gdf)}" if self.gdf is not None else "geo=non chargée"
+        if self.gdf_joint is not None:
+            n_ok = int((~self.gdf_joint["manquant"]).sum())
+            n_total = len(self.gdf_joint)
+            data = f"données={n_ok}/{n_total}"
+        else:
+            data = "données=non chargées"
+        couches = f"couches={len(self._couches)}"
+        return f"CarteCameroun(niveau={self.niveau!r}, {geo}, {data}, {couches})"
+
     def charger_geo(self, ville_osm: str = "Douala", forcer: bool = False):
         """Charge les limites géographiques selon le niveau choisi."""
         if self.niveau == "osm_quartiers":
@@ -1038,7 +1061,7 @@ class CarteCameroun:
             niv_nom = max(niveau_num, 1)
             self._col_nom = f"NAME_{niv_nom}"
         
-        print(f"[ok] {len(self.gdf)} zones chargées pour le niveau '{self.niveau}'")
+        logger.info(f"[ok] {len(self.gdf)} zones chargées pour le niveau '{self.niveau}'")
         return self
     
     def charger_metrique(
@@ -1064,7 +1087,11 @@ class CarteCameroun:
                        toute transformation implicite.
         diagnostic : affiche un rapport diagnostiquer_dataset() avant adaptation
         """
-        assert self.gdf is not None, "Appelez d'abord charger_geo()"
+        if self.gdf is None:
+            raise CarteCamerounError(
+                "La géométrie n'est pas chargée. "
+                "Appelez charger_geo() avant cette méthode."
+            )
         
         if diagnostic:
             diagnostiquer_dataset(df)
@@ -1074,9 +1101,11 @@ class CarteCameroun:
             col_nom_utilise   = "zone"
             col_valeur_utilise = "valeur"
         else:
-            assert col_nom and col_valeur, (
-                "Avec auto_adapter=False, col_nom et col_valeur sont obligatoires."
-            )
+            if not col_nom or not col_valeur:
+                raise ValueError(
+                    "Avec auto_adapter=False, col_nom et col_valeur sont obligatoires. "
+                    "Exemple : charger_metrique(df, col_nom='region', col_valeur='taux')"
+                )
             df_std = df
             col_nom_utilise    = col_nom
             col_valeur_utilise = col_valeur
@@ -1090,7 +1119,7 @@ class CarteCameroun:
             fuzzy=fuzzy
         )
         self._col_valeur = col_valeur_utilise
-        print(f"[ok] Jointure réussie — {(~self.gdf_joint['manquant']).sum()}/{len(self.gdf_joint)} zones avec données")
+        logger.info(f"[ok] Jointure réussie — {(~self.gdf_joint['manquant']).sum()}/{len(self.gdf_joint)} zones avec données")
         return self
 
     def diagnostiquer(self):
@@ -1126,7 +1155,11 @@ class CarteCameroun:
         Retourne le DataFrame de correspondance (utilisable pour inspection
         ou export), et l'affiche également dans la console.
         """
-        assert self.gdf_joint is not None, "Appelez d'abord charger_metrique()"
+        if self.gdf_joint is None:
+            raise CarteCamerounError(
+                "Les données ne sont pas chargées. "
+                "Appelez charger_metrique() avant cette méthode."
+            )
 
         colonnes = [self._col_nom, "_nom_origine", "_match_methode", "_match_score", "valeur", "manquant"]
         colonnes = [c for c in colonnes if c in self.gdf_joint.columns]
@@ -1180,7 +1213,11 @@ class CarteCameroun:
         zone       : nom de la zone à isoler (ex: "Littoral", "Wouri")
         col_parent : colonne à utiliser pour le filtre (déduite automatiquement si None)
         """
-        assert self.gdf_joint is not None, "Appelez d'abord charger_metrique()"
+        if self.gdf_joint is None:
+            raise CarteCamerounError(
+                "Les données ne sont pas chargées. "
+                "Appelez charger_metrique() avant cette méthode."
+            )
 
         col = col_parent or self._col_nom
         masque = self.gdf_joint[col].str.lower() == zone.lower()
@@ -1192,7 +1229,7 @@ class CarteCameroun:
                 from thefuzz import process as fp
                 match, score = fp.extractOne(zone, valeurs_dispo)
                 if score >= 70:
-                    print(f"[focus] '{zone}' non trouvé → correspondance : '{match}' ({score}%)")
+                    logger.info(f"[focus] '{zone}' non trouvé → correspondance : '{match}' ({score}%)")
                     masque = self.gdf_joint[col].str.lower() == match.lower()
                 else:
                     raise ValueError(f"Zone '{zone}' introuvable. Valeurs disponibles : {valeurs_dispo}")
@@ -1211,7 +1248,7 @@ class CarteCameroun:
         clone._zone_focus = zone
         clone._gdf_contexte = self.gdf_joint  # garde le contexte complet
 
-        print(f"[focus] Zone isolée : '{zone}' — {masque.sum()} entité(s)")
+        logger.info(f"[focus] Zone isolée : '{zone}' — {masque.sum()} entité(s)")
         return clone
 
     def drill_down(
@@ -1271,7 +1308,7 @@ class CarteCameroun:
             )
 
         gdf_zone = gdf_fin[masque].copy()
-        print(f"[drill_down] '{zone}' → {len(gdf_zone)} {niveau_interieur}")
+        logger.info(f"[drill_down] '{zone}' → {len(gdf_zone)} {niveau_interieur}")
 
         # Construit un nouveau CarteCameroun sur ce sous-ensemble
         clone = CarteCameroun(niveau=niveau_interieur)
@@ -1431,7 +1468,11 @@ class CarteCameroun:
                             dessine le reste du Cameroun en gris clair en arrière-plan
                             pour donner le contexte géographique.
         """
-        assert self.gdf_joint is not None, "Appelez d'abord charger_metrique()"
+        if self.gdf_joint is None:
+            raise CarteCamerounError(
+                "Les données ne sont pas chargées. "
+                "Appelez charger_metrique() avant cette méthode."
+            )
 
         gdf_contexte = getattr(self, "_gdf_contexte", None)
         zone_focus   = getattr(self, "_zone_focus", None)
@@ -1486,7 +1527,11 @@ class CarteCameroun:
         Génère la carte interactive.
         moteur : 'folium' (HTML) ou 'plotly' (Dash/Streamlit)
         """
-        assert self.gdf_joint is not None, "Appelez d'abord charger_metrique()"
+        if self.gdf_joint is None:
+            raise CarteCamerounError(
+                "Les données ne sont pas chargées. "
+                "Appelez charger_metrique() avant cette méthode."
+            )
 
         if moteur == "folium":
             return carte_interactive_folium(
@@ -1664,7 +1709,7 @@ def _carte_avec_contexte(
     if sortie:
         fig.savefig(sortie, dpi=s.dpi, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
-        print(f"[ok] Carte sauvegardée : {sortie}")
+        logger.info(f"[ok] Carte sauvegardée : {sortie}")
 
     return fig
 

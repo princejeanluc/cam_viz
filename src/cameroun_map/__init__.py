@@ -7,10 +7,29 @@ Usage minimal :
     carte.charger_geo()
     carte.charger_metrique(df)
     carte.visualiser(sortie="carte.png")
+
+Verbosité des logs (INFO par défaut) :
+    import logging
+    logging.getLogger("cameroun_map").setLevel(logging.WARNING)  # silencieux
+    logging.getLogger("cameroun_map").setLevel(logging.DEBUG)    # très verbeux
 """
+
+import logging as _logging
+
+# Handler par défaut : affiche les messages INFO+ dans la console/notebook
+# sans polluer le logger racine. Un seul handler évite les doublons si le
+# module est rechargé (ex : ipython autoreload).
+_log = _logging.getLogger("cameroun_map")
+if not _log.handlers:
+    _h = _logging.StreamHandler()
+    _h.setFormatter(_logging.Formatter("%(message)s"))
+    _log.addHandler(_h)
+    _log.setLevel(_logging.INFO)
+    _log.propagate = False  # ne remonte pas au logger racine
 
 from .cameroun_viz import (
     CarteCameroun,
+    CarteCamerounError,
     Style,
     charger_gadm,
     charger_osm_quartiers,
@@ -36,6 +55,7 @@ from .export_powerbi import exporter_pour_powerbi
 
 __all__ = [
     "CarteCameroun",
+    "CarteCamerounError",
     "Style",
     "SYMBOLES_PREDEFINIS",
     "charger_gadm",

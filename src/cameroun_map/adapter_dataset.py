@@ -21,6 +21,7 @@ Usage rapide :
     df_propre = adapter_dataset(df)        # transformation automatique
 """
 
+import logging
 import pandas as pd
 import numpy as np
 import re
@@ -29,7 +30,9 @@ try:
     from thefuzz import process as fuzzy_process
     _FUZZY_DISPONIBLE = True
 except ImportError:
-    _FUZZY_DISPONIBLE = False
+    logger = logging.getLogger("cameroun_map")
+
+_FUZZY_DISPONIBLE = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
